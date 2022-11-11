@@ -155,16 +155,20 @@ function find_cps(sys, spacing)
 end
 
 # bond paths and ring lines
+path_length(path) = sum([LinearAlgebra.norm(i-j) for (i,j) in zip(path[1:end-1], path[2:end])])
+minimumby(f, itr) = itr[argmin(map(f, itr))]
 function find_saddle_paths(sys, rank)
-    LOW = sys["o"]
-    HIGH = sys["o"] + sys["lv"] * sys["fIJK"]
-    f!(F, r) = sys["rho!"]
+    padding = sys["lv"] * (ones(3) .* sys["fIJK"] .* 0.05)
+    LOW = sys["o"] + padding
+    HIGH = sys["o"] + sys["lv"] * sys["fIJK"] - padding
+    f!(F, r) = sys["grad!"](F, r)
     saddles = [ cp for cp in sys["critical_points"] if cp["rank"] == rank ]
-    println("\nFinding $(length(saddles)) paths from rank $rank CPs")
+    println("\nFinding $(length(saddles)) paths from rank $rank CPs with padding $padding")
     offset = 0.1 * ones(3)
     bps_threads = [ [] for i=1:Threads.nthreads() ]
     Threads.@threads for cp in saddles
-        tspan = (0.0, 1e100)
+    # for cp in saddles
+        tspan = (0.0, 1e10)
         f_sign = (cp["rank"] > 0 ? -1 : 1)
         for i in [-1,1]
             u0 = copy(cp["r"])
@@ -172,14 +176,32 @@ function find_saddle_paths(sys, rank)
             function fb!(F, x, p, t)
                 (1 in (x .< LOW) ? f!(F, LOW) : (1 in (x .> HIGH) ? f!(F, HIGH) : f!(F, x)))
                 F .*= f_sign
+                # println("$t @ $x, grad = $F")
             end
             prob = ODEProblem(fb!,u0,tspan)
+            # println("Starting saddle path for CP at $(cp["r"])")
             sol = solve(prob)
-            println(repr(sol))
             bp = vcat([cp["r"]],sol[:])
+            # println("Length $(path_length(bp)) in $(length(bp)) pts")
             for i=3:length(bp[:,1])
-                if sum(LOW .<= bp[i] .<= HIGH) ≠ 3
+                min_dist_atom = minimumby(a->a[3], [[j, sys["atoms"][j]["r"], LinearAlgebra.norm(sys["atoms"][j]["r"] - bp[i])] for j in 1:length(sys["atoms"])])
+                if min_dist_atom[3] < 0.05
+                    bp = vcat(bp[1:i,:], [min_dist_atom[2]])
+                    # println("Snapping to atom $(min_dist_atom[1]) with $(i+1) pts with new length $(path_length(bp))")
+                    break
+                else
+                    cages = [cp for cp in sys["critical_points"] if cp["rank"] == 3]
+                    min_dist_cage = minimumby(a->a[3], [[j, cages[j]["r"], LinearAlgebra.norm(cages[j]["r"] - bp[i])] for j in 1:length(cages)])
+                    if min_dist_cage[3] < 0.05
+                        bp = vcat(bp[1:i,:], [min_dist_cage[2]])
+                        # println("Snapping to cage $(min_dist_cage[1]) with $(i+1) pts with new length $(path_length(bp))")
+                        break
+                    end
+                end
+                if sum(LOW .<= bp[i] .<= HIGH) ≠ 3 ||
+                        (i < length(bp) - 10 && LinearAlgebra.norm(bp[i]-bp[i+5]) < 0.01)
                     bp = bp[1:i,:]
+                    # println("Truncating (boundary/stalled) to $i pts with new length $(path_length(bp))")
                     break
                 end
             end
@@ -207,7 +229,7 @@ function plot_results(sys)
         z=Z[:],
         value=values[:],
         # colorscale=colors.RdBu_3,
-        opacity=0.9,
+        opacity=0.5,
         isomin=0.25,
         isomax=0.25,
         surface_count=1,
@@ -219,19 +241,28 @@ function plot_results(sys)
     ]
 
     # bond paths
-    for bp in vcat(sys["bond_paths"], sys["ring_lines"])
+    # for bp in vcat(sys["bond_paths"], sys["ring_lines"])
+    for bp in sys["bond_paths"]
         r = invert(bp)
+        c = [ sys["rho"](i) for i in bp[:] ]
+        println("Plotting saddle path with $(length(bp)) pts")
+        [println(join([(j,x) for (j,x) in enumerate(r[i])], "\n")) for i in 1:3]
+        # println(join(["$i: $x" for (i,x) in enumerate(bp)], "\n"))
+        # println(join(["$i: $x" for (i,x) in enumerate(c)], "\n"))
         push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3],
-                            line=attr(color=[ sum(eigvals(sys["hess"](i))) for i=bp[:] ]), width=2,
-                            type = "scatter3d",
-                            mode = "lines"))
+                    # line=attr(color=c, width=4),
+                    type = "scatter3d",
+                    mode = "lines"))
+        break
     end
 
     # nuclear coordinates
     r = invert([a["r"] for a in sys["atoms"]])
-    push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], mode="markers", 
-    type="scatter3d", legend=false,
-    marker=attr(color=[a["color"] for a in sys["atoms"]]), line=attr(color="black", width=3)))
+    push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], 
+                mode="markers", type="scatter3d", legend=false,
+                marker=attr(color=[a["color"] for a in sys["atoms"]]), 
+                line=attr(color="black", width=3))
+                )
 
     # saddles = [ cp for cp in sys["critical_points"] if abs(cp["rank"]) == 1 ]
     # if ! isempty(saddles)
@@ -254,7 +285,7 @@ function plot_results(sys)
         marker=attr(color=[a["rank"] for a in cps], line=attr(color="black", width=3)))) 
     end
 
-    layout = PlotlyJS.Layout(autosize=false, width=800, height=500,
+    layout = PlotlyJS.Layout(autosize=false, width=1000, height=900,
                         margin=attr(l=0, r=0, b=0, t=65))
 
     PlotlyJS.plot(traces, layout)
@@ -267,6 +298,4 @@ sys["critical_points"] = find_cps(sys, 1.0)
 sys["bond_paths"] = find_bond_paths(sys)
 sys["ring_lines"] = find_ring_lines(sys)
 
-println(join(["$(bp[begin]) -> $(bp[end])" for bp in sys["bond_paths"]], "\n"))
-
-# plot_results(sys)
+plot_results(sys)
