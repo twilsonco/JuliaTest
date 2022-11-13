@@ -1,6 +1,9 @@
 
-using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine
+
+using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras
 using Interpolations, NLsolve, LinearAlgebra, DifferentialEquations
+
+
 atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#3050F8",
                "#FF0D0D","#90E050","#B3E3F5","#AB5CF2","#8AFF00","#BFA6A6","#F0C8A0",
                "#FF8000","#FFFF30","#1FF01F","#80D1E3","#8F40D4","#3DFF00","#E6E6E6",
@@ -19,7 +22,7 @@ atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#305
                "#D90045","#E00038","#E6002E","#EB0026","#FF00A0","#FF00A0","#FF00A0",
                "#FF00A0","#FF00A0","#FF00A0","#FF00A0","#FF00A0","#FF00A0")
 function import_cub(fname)
-    println("\nImporting data from $fname")
+    @info "Importing data from $fname"
     f = open(fname)
     title, var, natoms_origin = [readline(f) for i=1:3]
     io = IOBuffer(natoms_origin)
@@ -61,6 +64,7 @@ function import_cub(fname)
         "fIJK" => fIJK,
         "atoms" => atoms,
         "rho_data" => data)
+    # out["rho(x,y,z)"] = scale(interpolate(out["rho_data"], BSpline(Quadratic(Flat(OnCell())))), g[1], g[2], g[3])
     out["rho(x,y,z)"] = scale(interpolate(out["rho_data"], BSpline(Cubic(Flat(OnCell())))), g[1], g[2], g[3])
     out["rho"] = (r) -> out["rho(x,y,z)"](r[1], r[2], r[3])
     out["rho!"] = (F, r) -> (F = out["rho"](r))
@@ -69,7 +73,7 @@ function import_cub(fname)
     out["hess!"] = (J, r) -> Interpolations.hessian!(J, out["rho(x,y,z)"], r[1], r[2], r[3])
     out["hess"] = (r) -> (J = zeros(3,3); out["hess!"](J, r); J)
 
-    println("System: $(length(out["atoms"])) atoms, $(join(out["IJK"], " × ")) = $(prod(out["IJK"])) points\n")
+    @info "System: $(length(out["atoms"])) atoms, $(join(out["IJK"], " × ")) = $(prod(out["IJK"])) points"
     return out
 end
 
@@ -81,7 +85,7 @@ function find_cps(sys, spacing)
     # define critical point search grid
     X, Y, Z = [LOW[i] + 2spacing : spacing : HIGH[i] - 2spacing for i=1:3]
     cl = Float32(spacing)
-    println("\nCP search using $(prod(length.([X,Y,Z]))) cells with spacing of $cl")
+    @info "CP search using $(prod(length.([X,Y,Z]))) cells with spacing of $cl"
     results = [ [] for i=1:Threads.nthreads() ] 
     # perform grid-based CP search in shared memory parallel
     Threads.@threads for xi=X
@@ -111,13 +115,14 @@ function find_cps(sys, spacing)
 
     # create critical point data structure
     cp_info = []
-    for ro=results
-        for r=ro
-            x1 = r.zero
+    pushfirst!(results, sys["atoms"])
+    for (ri,ro) in enumerate(results)
+        for r in ro
+            x1 = (ri > 1 ? r.zero : r["r"])
             if min([LinearAlgebra.norm(x1-a["r"]) for a in sys["atoms"]]...) > 4
-                # println("Skipping CP because too far from atoms")
-                continue
+                continue # skip points too far from any known atoms
             end
+            ρ = sys["rho"](x1)
             A = sys["hess"](x1)
             λ = eigvals(A)
             ε = eigvecs(A)
@@ -125,87 +130,111 @@ function find_cps(sys, spacing)
             if length(cp_info) > 0 
                 check_cps = [LinearAlgebra.norm(x1-cp["r"]) for 
                              cp in cp_info if 
-                                cp["rank"] >= rank]
+                                cp["rank"] >= rank && 
+                                sys["rho"](cp["r"]) > ρ]
                 if ! isempty(check_cps)
                     min_dist = min(check_cps...)
-                    # println(min_dist)
-                    if min_dist < 0.01
-                        # println("Skipping CP because too close to existing CP")
-                        continue
+                    if min_dist < 0.05
+                        continue # skip points too close to another CP of the same rank
                     end
                 end
             end
             push!(cp_info, Dict("rank" => rank, 
                                 "ε" => ε, 
                                 "λ" => λ, 
-                                "r" => r.zero,
-                                "root" => r))
-            # println(length(cp_info))
+                                "r" => x1,
+                                "root" => (ri > 1 ? r : "")))
         end
     end
-    println("$(length(cp_info)) roots found:")
+    max_rho = max([sys["rho"](cp["r"]) for cp in cp_info]...) + 1
+    sort!(cp_info; by= cp->cp["rank"] + sys["rho"](cp["r"]) / max_rho)
+    for i in 1:lastindex(cp_info)
+        cp_info[i]["index"] = i
+    end
+    @info "$(length(cp_info)) CPs found"
     for rnk in [-3,-1,1,3]
-        cps = sort([cp for cp in cp_info if cp["rank"] == rnk], rev=true, by = x -> sum(x["λ"]))
-        if ! isempty(cps)
-            println("$(length(cps)) cps of rank $(rnk)")
-            # [println("Rank $(cp["rank"]) CP @ $(cp["r"]), ∇² = $(sum(cp["λ"])) \n") for cp in cps]
-        end
+        cps = [cp for cp in cp_info if cp["rank"] == rnk]
+        @info "$(length(cps)) cps of rank $(rnk)"
     end
+    # with_logger(FormatLogger(LoggingFormats.Truncated(200))) do
+    #     for cp in cp_info
+    #         r = cp["r"]
+    #         ρ = sys["rho"](r)
+    #         λ = cp["λ"]
+    #         @debug "Rank $(cp["rank"]): CP #$(cp["index"])" r ρ λ
+    #     end
+    # end
     return cp_info
 end
 
 # bond paths and ring lines
 path_length(path) = sum([LinearAlgebra.norm(i-j) for (i,j) in zip(path[1:end-1], path[2:end])])
 minimumby(f, itr) = itr[argmin(map(f, itr))]
-function find_saddle_paths(sys, rank)
+function create_gradient_path(sys, start_pt, direction, cutoff)
     padding = sys["lv"] * (ones(3) .* sys["fIJK"] .* 0.05)
     LOW = sys["o"] + padding
     HIGH = sys["o"] + sys["lv"] * sys["fIJK"] - padding
+    tspan = (0.0, 1e10)
+    u0 = start_pt
     f!(F, r) = sys["grad!"](F, r)
+    function fb!(F, x, p, t)
+        (1 in (x .< LOW) ? f!(F, LOW) : (1 in (x .> HIGH) ? f!(F, HIGH) : f!(F, x)))
+        F .*= direction
+    end
+    prob = ODEProblem(fb!,u0,tspan)
+    sol = solve(prob, AutoVern9(KenCarp5()))
+    bp = sol[:]
+    end_cp = -1
+    for i=3:lastindex(bp[:,1])
+        # min_dist_atom = minimumby(a->a[3], [[j, sys["atoms"][j]["r"], LinearAlgebra.norm(sys["atoms"][j]["r"] - bp[i])] for j in 1:lastindex(sys["atoms"])])
+        # if min_dist_atom[3] < 0.05
+        #     bp = vcat(bp[1:i-1,:], [min_dist_atom[2]])
+        #     end_cp = min_dist_atom[1]
+        #     @debug "Snapping to atom @ $(min_dist_atom[2])" bp
+        #     break
+        # else
+        cps = [cp for cp in sys["critical_points"] if abs(cp["rank"]) == 3]
+        min_dist_cp = minimumby(a->a[3], [[j, cps[j]["r"], LinearAlgebra.norm(cps[j]["r"] - bp[i])] for j in 1:lastindex(cps)])
+        if min_dist_cp[3] < 0.5
+            bp = vcat(bp[1:i-1,:], [min_dist_cp[2]])
+            end_cp = min_dist_cp[1]
+            @debug "Snapping to terminal cp @ $(min_dist_cp[2])" bp
+            break
+        end
+        # end
+        last_step = (i < length(bp) - 10 ? LinearAlgebra.norm(bp[i]-bp[i+5]) : 1)
+        ρ = sys["rho"](bp[i])
+        if sum(LOW .<= bp[i] .<= HIGH) ≠ 3 ||
+                (last_step < 0.00001) || ρ < cutoff
+            bp = bp[1:i,:]
+            @debug "Truncating" i last_step ρ bp
+            break
+        end
+    end
+    out = Dict("r" => mapreduce(permutedims, vcat, bp),
+               "start_cp" => -1,
+               "end_cp" => end_cp)
+    return out
+end
+function find_saddle_paths(sys, rank, cutoff=0.001)
     saddles = [ cp for cp in sys["critical_points"] if cp["rank"] == rank ]
-    println("\nFinding $(length(saddles)) paths from rank $rank CPs with padding $padding")
+    padding = sys["lv"] * (ones(3) .* sys["fIJK"] .* 0.05)
+    @info "Finding $(length(saddles)) paths from rank $rank CPs with padding $padding"
     offset = 0.1 * ones(3)
     bps_threads = [ [] for i=1:Threads.nthreads() ]
-    Threads.@threads for cp in saddles
-    # for cp in saddles
-        tspan = (0.0, 1e10)
+    Threads.@threads for cp in sys["critical_points"]
+    # for cp in sys["critical_points"]
+        if cp["rank"] ≠ rank
+            continue
+        end
         f_sign = (cp["rank"] > 0 ? -1 : 1)
         for i in [-1,1]
             u0 = copy(cp["r"])
             u0 .+= cp["ε"][:,(cp["rank"] > 0 ? 1 : 3)] .* offset * i
-            function fb!(F, x, p, t)
-                (1 in (x .< LOW) ? f!(F, LOW) : (1 in (x .> HIGH) ? f!(F, HIGH) : f!(F, x)))
-                F .*= f_sign
-                # println("$t @ $x, grad = $F")
-            end
-            prob = ODEProblem(fb!,u0,tspan)
-            # println("Starting saddle path for CP at $(cp["r"])")
-            sol = solve(prob)
-            bp = vcat([cp["r"]],sol[:])
-            # println("Length $(path_length(bp)) in $(length(bp)) pts")
-            for i=3:length(bp[:,1])
-                min_dist_atom = minimumby(a->a[3], [[j, sys["atoms"][j]["r"], LinearAlgebra.norm(sys["atoms"][j]["r"] - bp[i])] for j in 1:length(sys["atoms"])])
-                if min_dist_atom[3] < 0.05
-                    bp = vcat(bp[1:i,:], [min_dist_atom[2]])
-                    # println("Snapping to atom $(min_dist_atom[1]) with $(i+1) pts with new length $(path_length(bp))")
-                    break
-                else
-                    cages = [cp for cp in sys["critical_points"] if cp["rank"] == 3]
-                    min_dist_cage = minimumby(a->a[3], [[j, cages[j]["r"], LinearAlgebra.norm(cages[j]["r"] - bp[i])] for j in 1:length(cages)])
-                    if min_dist_cage[3] < 0.05
-                        bp = vcat(bp[1:i,:], [min_dist_cage[2]])
-                        # println("Snapping to cage $(min_dist_cage[1]) with $(i+1) pts with new length $(path_length(bp))")
-                        break
-                    end
-                end
-                if sum(LOW .<= bp[i] .<= HIGH) ≠ 3 ||
-                        (i < length(bp) - 10 && LinearAlgebra.norm(bp[i]-bp[i+5]) < 0.01)
-                    bp = bp[1:i,:]
-                    # println("Truncating (boundary/stalled) to $i pts with new length $(path_length(bp))")
-                    break
-                end
-            end
-            push!(bps_threads[Threads.threadid()], bp)
+            gp = create_gradient_path(sys, u0, f_sign, cutoff)
+            gp["r"] = vcat(transpose(cp["r"]), gp["r"])
+            gp["start_cp"] = cp["index"]
+            push!(bps_threads[Threads.threadid()], gp)
         end
     end
     bps = []
@@ -216,7 +245,7 @@ find_bond_paths(sys) = find_saddle_paths(sys, -1)
 find_ring_lines(sys) = find_saddle_paths(sys, 1)
 
 function plot_results(sys)
-    println("Plotting results")
+    @info "Plotting results"
     # prepare data for isosurface and slice plot
     data = [range(sys["o"][i] + 1, stop=sys["o"][i] + (sys["lv"] * sys["fIJK"])[i] - 1, length=150) for i=1:3]
     X, Y, Z = mgrid(data[1], data[2], data[3])
@@ -232,8 +261,9 @@ function plot_results(sys)
         opacity=0.5,
         isomin=0.25,
         isomax=0.25,
-        surface_count=1,
+        surface_count=0,
         caps=attr(x_show=false, y_show=false),
+        name=split(sys["name"], "/")[end],
         # slices_z=attr(show=true, locations=[0]),
         # slices_y=attr(show=true, locations=[0]),
         # slices_x=attr(show=true, locations=[0]),
@@ -241,48 +271,57 @@ function plot_results(sys)
     ]
 
     # bond paths
-    # for bp in vcat(sys["bond_paths"], sys["ring_lines"])
-    for bp in sys["bond_paths"]
-        r = invert(bp)
-        c = [ sys["rho"](i) for i in bp[:] ]
-        println("Plotting saddle path with $(length(bp)) pts")
-        [println(join([(j,x) for (j,x) in enumerate(r[i])], "\n")) for i in 1:3]
-        # println(join(["$i: $x" for (i,x) in enumerate(bp)], "\n"))
-        # println(join(["$i: $x" for (i,x) in enumerate(c)], "\n"))
-        push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3],
-                    # line=attr(color=c, width=4),
+    for (i,bp) in enumerate(vcat(sys["bond_paths"], sys["ring_lines"]))
+        # r = invert(bp)
+        # r = transpose(bp)
+        # c = [ sys["rho"](i) for i in bp ]
+        # with_logger(FormatLogger(LoggingFormats.Truncated(500))) do
+        #     @info "bp plot" [length(i) for i in [r[1], r[2], r[3], c]]
+        # end
+        name = (i <= length(sys["bond_paths"]) ? "BP" : "RP") * " $(bp["start_cp"])—$(bp["end_cp"])"
+        w = (bp["end_cp"] > 0 && sys["critical_points"][bp["end_cp"]]["rank"] == -3 ? 10 : 0.8)
+        push!(traces, PlotlyJS.scatter(x=bp["r"][:,1], y=bp["r"][:,2], z=bp["r"][:,3],
+                    line=attr(color=log.(sys["rho"].(eachrow(bp["r"]))), width=w),
                     type = "scatter3d",
-                    mode = "lines"))
-        break
+                    mode = "lines",
+                    name=name))
     end
 
     # nuclear coordinates
     r = invert([a["r"] for a in sys["atoms"]])
     push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], 
                 mode="markers", type="scatter3d", legend=false,
-                marker=attr(color=[a["color"] for a in sys["atoms"]]), 
-                line=attr(color="black", width=3))
+                marker=attr(color=[a["color"] for a in sys["atoms"]],
+                    size=[20 + min(a["data"].number * 3, 100) for a in sys["atoms"]]), 
+                line=attr(color="black", width=3),
+                name="Atom coord.")
                 )
 
-    # saddles = [ cp for cp in sys["critical_points"] if abs(cp["rank"]) == 1 ]
-    # if ! isempty(saddles)
-    #     r = invert([ cp["r"] for cp in saddles ])
-    #     ε = invert([ 
-    #             LinearAlgebra.normalize(cp["ε"][:,(cp["rank"] > 0 ? 1 : 3)]) .* 
-    #             abs(cp["λ"][(cp["rank"] > 0 ? 1 : 3)]) .*
-    #             (cp["rank"] > 0 ? 20 : 0.8) for cp in saddles 
-    #         ])
-    #     push!(traces, PlotlyJS.cone(x=vcat(r[1], r[1]), y=vcat(r[2], r[2]), z=vcat(r[3], r[3]),
-    #                         u=vcat(ε[1], -ε[1]), v=vcat(ε[2], -ε[2]), w=vcat(ε[3], -ε[3]),
-    #                         anchor="tip", sizemode="absolute", sizeref=0.1, legend=false))
-    # end
+    saddles = [ cp for cp in sys["critical_points"] if abs(cp["rank"]) == 1 ]
+    if ! isempty(saddles)
+        r = invert([ cp["r"] for cp in saddles ])
+        # ε = invert([ 
+        #         LinearAlgebra.normalize(cp["ε"][:,(cp["rank"] > 0 ? 1 : 3)]) .* 
+        #         abs(cp["λ"][(cp["rank"] > 0 ? 1 : 3)]) .*
+        #         (cp["rank"] > 0 ? 20 : 0.8) for cp in saddles 
+        #     ])
+        # push!(traces, PlotlyJS.cone(x=vcat(r[1], r[1]), y=vcat(r[2], r[2]), z=vcat(r[3], r[3]),
+        #                     u=vcat(ε[1], -ε[1]), v=vcat(ε[2], -ε[2]), w=vcat(ε[3], -ε[3]),
+        #                     anchor="tip", sizemode="absolute", sizeref=0.075, legend=false,
+        #                     name="Saddle CP"))
+        push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], mode="markers", 
+                                type="scatter3d", legend=false,
+                                marker=attr(color=[a["rank"] for a in saddles], line=attr(color="black", width=3)),
+                                name="Saddle CP")) 
+    end
 
-    cps = [a for a in sys["critical_points"] if abs(a["rank"]) == 3]
+    cps = [a for a in sys["critical_points"] if a["rank"] == 3]
     if ! isempty(cps)
         r = invert([a["r"] for a in cps]) # only bond/ring/cage cps
         push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], mode="markers", 
         type="scatter3d", legend=false,
-        marker=attr(color=[a["rank"] for a in cps], line=attr(color="black", width=3)))) 
+        marker=attr(color=[a["rank"] for a in cps], line=attr(color="black", width=3)),
+        name="Cage CP")) 
     end
 
     layout = PlotlyJS.Layout(autosize=false, width=1000, height=900,
@@ -291,10 +330,15 @@ function plot_results(sys)
     PlotlyJS.plot(traces, layout)
 end
 
-fname = "/Users/haiiro/SynologyDrive/Projects/Julia/JuliaTest/DrWatson Example/data/sims/adamantane-fine.cub" 
+# fname = "/Users/haiiro/SynologyDrive/Projects/Julia/JuliaTest/DrWatson Example/data/sims/adamantane-fine.cub" 
+fname = "/Users/haiiro/SynologyDrive/Projects/Julia/JuliaTest/DrWatson Example/data/sims/buckyball-water.cub" 
 
 sys = import_cub(fname)
-sys["critical_points"] = find_cps(sys, 1.0)
+# r = [a["r"] for a in sys["atoms"] if a["data"].name == "Carbon"][1]
+# x = -1:0.01:1
+# rho = [sys["rho(x,y,z)"](r[1] + dx, r[2], r[3]) for dx in x]
+# PlotlyJS.plot(PlotlyJS.scatter(x=x,y=rho))
+sys["critical_points"] = find_cps(sys, 0.8)
 sys["bond_paths"] = find_bond_paths(sys)
 sys["ring_lines"] = find_ring_lines(sys)
 
