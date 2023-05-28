@@ -2,8 +2,8 @@
 # Pkg.add("ModularIndices")
 # return
 
-using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras, ModularIndices
-using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim
+using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras, ModularIndices, Random, Distributions
+using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter
 
 atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#3050F8",
                "#FF0D0D","#90E050","#B3E3F5","#AB5CF2","#8AFF00","#BFA6A6","#F0C8A0",
@@ -42,7 +42,7 @@ function import_cub(fname)
     lattice = transpose(npts_lattice[2:end,:])
 
     atoms_raw = [Parsers.parse(Float32, io, opts) for i=1:5, ln=1:num_atoms]
-    atoms = [Dict("data" => elements[Int(atoms_raw[1,i])], 
+    atoms = [Dict("data" => PeriodicTable.elements[Int(atoms_raw[1,i])], 
                   "color" => atom_colors[Int(atoms_raw[1,i])],
                   "r" => atoms_raw[3:5,i])
                 for i=1:num_atoms]
@@ -65,8 +65,8 @@ function import_cub(fname)
         "fIJK" => fIJK,
         "atoms" => atoms,
         "rho_data" => data)
-    # out["rho(x,y,z)"] = scale(extrapolate(interpolate(out["rho_data"], BSpline(Quadratic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
-    out["rho(x,y,z)"] = scale(extrapolate(interpolate(out["rho_data"], BSpline(Cubic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
+    # out["rho(x,y,z)"] = Interpolations.scale(extrapolate(interpolate(out["rho_data"], BSpline(Quadratic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
+    out["rho(x,y,z)"] = Interpolations.scale(extrapolate(interpolate(out["rho_data"], BSpline(Quadratic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
     out["rho"] = (r) -> out["rho(x,y,z)"](r[1], r[2], r[3])
     out["rho!"] = (F, r) -> (F = out["rho"](r))
     out["grad!"] = (F, r) -> Interpolations.gradient!(F, out["rho(x,y,z)"], r[1], r[2], r[3])
@@ -189,7 +189,7 @@ function create_gradient_path(sys, start_pt, direction, cutoff)
     for i=3:lastindex(bp[:,1])
         cps = [cp for cp in sys["critical_points"] if abs(cp["rank"]) == 3]
         min_dist_cp = minimumby(a->a[3], [[j, cps[j]["r"], LinearAlgebra.norm(cps[j]["r"] - bp[i])] for j in 1:lastindex(cps)])
-        if min_dist_cp[3] < 0.01
+        if min_dist_cp[3] < 0.05
             bp = vcat(bp[1:i-1,:], [min_dist_cp[2]])
             end_cp = min_dist_cp[1]
             @debug "Snapping to terminal cp @ $(min_dist_cp[2])" bp
@@ -220,7 +220,7 @@ function find_saddle_paths(sys, rank, cutoff=0.001)
         if cp["rank"] ≠ rank
             continue
         end
-        f_sign = (cp["rank"] > 0 ? -1 : 1)
+        f_sign = -rank
         for i in [-1,1]
             u0 = copy(cp["r"])
             u0 .+= cp["ε"][:,(cp["rank"] > 0 ? 1 : 3)] .* offset * i
@@ -282,7 +282,7 @@ function find_saddle_surfaces(sys, rank, cutoff = 0.001)
     return surfs
 end
 
-function plot_results(sys; extra_paths=[], extra_points=[])
+function plot_results(sys; extra_paths=[], extra_points=[], extra_gps=[])
     @info "Plotting results"
     # prepare data for isosurface and slice plot
     data = [range(sys["o"][i] + 1, stop=sys["o"][i] + (sys["lv"] * sys["fIJK"])[i] - 1, length=150) for i=1:3]
@@ -295,7 +295,7 @@ function plot_results(sys; extra_paths=[], extra_points=[])
         y=Y[:],
         z=Z[:],
         value=values[:],
-        # colorscale=colors.RdBu_3,
+        # colorInterpolations.scale=colors.RdBu_3,
         opacity=0.5,
         isomin=-1,
         isomax=-1,
@@ -303,7 +303,7 @@ function plot_results(sys; extra_paths=[], extra_points=[])
         caps=attr(x_show=false, y_show=false),
         name=split(sys["name"], "/")[end],
         legend=false,
-        # slices_z=attr(show=true, locations=[0]),
+        slices_z=attr(show=true, locations=[0]),
         # slices_y=attr(show=true, locations=[0]),
         # slices_x=attr(show=true, locations=[0]),
         )
@@ -315,6 +315,17 @@ function plot_results(sys; extra_paths=[], extra_points=[])
         w = (bp["end_cp"] > 0 && sys["critical_points"][bp["end_cp"]]["rank"] == -3 ? 10 : 0.8)
         push!(traces, PlotlyJS.scatter(x=bp["r"][:,1], y=bp["r"][:,2], z=bp["r"][:,3],
                     line=attr(color=log.(sys["rho"].(eachrow(bp["r"]))), width=w),
+                    type = "scatter3d", legend=false,
+                    mode = "lines",
+                    name=name))
+    end
+
+    # extra gps
+    for (i,bp) in enumerate(extra_gps)
+        name = "Extra gp $(i)"
+        w = 5
+        push!(traces, PlotlyJS.scatter(x=bp["r"][:,1], y=bp["r"][:,2], z=bp["r"][:,3],
+                    line=attr(color=:red, width=w),
                     type = "scatter3d", legend=false,
                     mode = "lines",
                     name=name))
@@ -343,15 +354,15 @@ function plot_results(sys; extra_paths=[], extra_points=[])
         break
     end
 
-    # # nuclear coordinates
-    # r = invert([a["r"] for a in sys["atoms"]])
-    # push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], 
-    #             mode="markers", type="scatter3d", legend=false,
-    #             marker=attr(color=[a["color"] for a in sys["atoms"]],
-    #                 size=[20 + min(a["data"].number * 3, 100) for a in sys["atoms"]]), 
-    #             line=attr(color="black", width=3),
-    #             name="Atom coord.")
-    #             )
+    # nuclear coordinates
+    r = invert([a["r"] for a in sys["atoms"]])
+    push!(traces, PlotlyJS.scatter(x=r[1], y=r[2], z=r[3], 
+                mode="markers", type="scatter3d", legend=false,
+                marker=attr(color=[a["color"] for a in sys["atoms"]],
+                    size=[20 + min(a["data"].number * 3, 100) for a in sys["atoms"]]), 
+                line=attr(color="black", width=3),
+                name="Atom coord.")
+                )
 
     saddles = [ cp for cp in sys["critical_points"] if abs(cp["rank"]) == 1 ]
     if ! isempty(saddles)
@@ -466,23 +477,28 @@ function create_y_to_xyz_interpolation(xyz_positions, y_values; interp_type=Inte
 
         gridded_interpolant = interpolate(sorted_y, sorted_xyz[:, 1], Gridded(Linear()))
         temp_vals = gridded_interpolant.(regular_y_points)
-        x_interpolation = extrapolate(scale(interpolate(temp_vals, BSpline(interp_type(Line(OnGrid())))), y_range), Interpolations.Flat())
+        x_interpolation = extrapolate(Interpolations.scale(interpolate(temp_vals, BSpline(interp_type(Interpolations.Line(OnGrid())))), y_range), Interpolations.Flat())
 
         gridded_interpolant = interpolate(sorted_y, sorted_xyz[:, 2], Gridded(Linear()))
         temp_vals = gridded_interpolant.(regular_y_points)
-        y_interpolation = extrapolate(scale(interpolate(temp_vals, BSpline(interp_type(Line(OnGrid())))), y_range), Interpolations.Flat())
+        y_interpolation = extrapolate(Interpolations.scale(interpolate(temp_vals, BSpline(interp_type(Interpolations.Line(OnGrid())))), y_range), Interpolations.Flat())
 
         gridded_interpolant = interpolate(sorted_y, sorted_xyz[:, 3], Gridded(Linear()))
         temp_vals = gridded_interpolant.(regular_y_points)
-        z_interpolation = extrapolate(scale(interpolate(temp_vals, BSpline(interp_type(Line(OnGrid())))), y_range), Interpolations.Flat())
+        z_interpolation = extrapolate(Interpolations.scale(interpolate(temp_vals, BSpline(interp_type(Interpolations.Line(OnGrid())))), y_range), Interpolations.Flat())
         return ParametrizedGradientPath(x_interpolation, y_interpolation, z_interpolation, minmax[1], minmax[2])
     end
 
 end
 
-function gp_parametrize(path, f; interp_type=Interpolations.Quadratic)
+function gp_parametrize(path; f = "length", interp_type=Interpolations.Quadratic)
     x = path["r"]
-    y = [f(r) for r in eachrow(path["r"])]
+    if f == "length"
+        g(i) = i > 1 ? sum([LinearAlgebra.norm(path["r"][j, :] .- path["r"][j-1, :]) for j in 2:i]) : 0.0
+        y = [g(i) for i in 1:size(path["r"], 1)]
+    else
+        y = [f(r) for r in eachrow(path["r"])]
+    end
     return create_y_to_xyz_interpolation(x, y, interp_type=interp_type)
     # return interpolate(rho_vals, path["r"], Gridded(Linear()))
 end
@@ -657,6 +673,263 @@ function plot_parameterized_gps(sys)
     PlotlyJS.plot(plot_traces, layout)
 end
 
+function principal_curvatures_and_directions(point, sys)
+    rho = sys["rho"]
+    grad = sys["grad"]
+    hess = sys["hess"]
+
+    rho_value = rho(point) # [e/bohr^3]
+    grad_value = grad(point) # [e/bohr^4]
+    grad_norm = norm(grad_value) 
+    hess_value = hess(point) # [e/bohr^5]
+
+    # Normalizing the gradient to obtain the normal vector.
+    normal_vector = normalize(grad_value)
+
+    # Creating the projection matrix.
+    P = I - normal_vector * normal_vector'
+
+    # Projecting the Hessian onto the tangent plane, negating it and normalizing it by the gradient norm.
+    # e/bohr^5 / ([e/bohr^4]) [=] 1/bohr, units of curvature
+    W = - P * hess_value * P / grad_norm
+
+    # Finding the eigenvalues and eigenvectors of the Weingarten matrix.
+    eigen_decomposition = eigen(W)
+
+    # Getting the indices that would sort the eigenvalues by their absolute values in descending order.
+    sorted_indices = sortperm(abs.(eigen_decomposition.values), rev=true)
+
+    # Selecting the two largest absolute value eigenvalues and their corresponding eigenvectors.
+    principal_curvatures = eigen_decomposition.values[sorted_indices][1:2]
+    principal_directions = eigen_decomposition.vectors[:, sorted_indices]
+
+    return principal_curvatures, principal_directions
+end
+
+
+
+function isosurface_mean_curvature_at_point(point, sys)
+    iso_k = principal_curvatures_and_directions(point, sys)
+    mean_k = (iso_k[1][1] + iso_k[1][2]) / 2
+    return mean_k
+end
+
+
+function make_sphere(point, radius, resolution=30)
+    # sphere geometry
+    sphere = Meshes.Sphere(point, radius)
+
+    # polygonal mesh with quadrangles + triangles
+    mesh = Meshes.discretize(sphere, RegularDiscretization(resolution, resolution))
+end
+
+function dA(gp, sys, s; a = gp.fmin)
+    f(x) = 2 * isosurface_mean_curvature_at_point(gp[x], sys)
+    return quadgk(f, a, s)[1]
+end
+
+# for precomputing the dA values
+function gp_parametrize_dA(parameterized_gp, sys; interp_type=Interpolations.Quadratic)
+    path_step = parameterized_gp.fmax / 100
+    x = 0:path_step:parameterized_gp.fmax
+    y = [dA(parameterized_gp, sys, s) for s in x]
+    if interp_type == Interpolations.Linear
+        return extrapolate(interpolate(x, y, Gridded(Linear())), Interpolations.Flat())
+    else
+        return extrapolate(Interpolations.scale(interpolate(y, BSpline(interp_type(Interpolations.Line(OnGrid())))), x), Interpolations.Flat())
+    end
+    # return interpolate(rho_vals, path["r"], Gridded(Linear()))
+end
+
+function gp_parametrize_dA1(parameterized_gp, sys; interp_type=Interpolations.Quadratic)
+    path_step = parameterized_gp.fmax / 20
+    x = 0:path_step:parameterized_gp.fmax
+    y = zeros(length(x))
+    for i in 1:length(x)
+        prev_sum = y[max(i-1,1)]
+        lower_limit = x[max(i-1,1)]
+        new_sum_component = dA(parameterized_gp, sys, x[i], a = lower_limit)
+        y[i] = prev_sum + new_sum_component
+        # check_val = dA(parameterized_gp, sys, x[i])
+        # @info "step $i" prev_sum lower_limit new_sum_component y[i] check_val
+    end
+    if interp_type == Interpolations.Linear
+        return extrapolate(interpolate(x, y, Gridded(Linear())), Interpolations.Flat())
+    else
+        return extrapolate(Interpolations.scale(interpolate(y, BSpline(interp_type(Interpolations.Line(OnGrid())))), x), Interpolations.Flat())
+    end
+    # return interpolate(rho_vals, path["r"], Gridded(Linear()))
+end
+
+function integrate_dgb(gp, sys, a_0, f_list)
+    out = zeros(length(f_list))
+    gp_dA = gp_parametrize_dA1(gp, sys)
+    for i in 1:length(f_list)
+        f(x) = gp_dA[x] * f_list[i](gp[x])
+        out[i] = quadgk(f, gp.fmin, gp.fmax)[1] * a_0
+    end
+    return out
+end
+
+function test_isosurface_curvature_for_gp(sys)
+    # gp = create_gradient_path(sys, [1; 1; 1], 1, 1e-3)
+    # gp1 = create_gradient_path(sys, [1; 1; 1], -1, 1e-3)
+    gp = create_gradient_path(sys, [1; 1; 3], 1, 1e-3)
+    gp1 = create_gradient_path(sys, [1; 1; 3], -1, 1e-3)
+    println(size(gp["r"]))
+    gp["r"] = vcat(reverse(gp["r"], dims=1), gp1["r"][2:end, :])
+    gp["start_cp"] = gp1["end_cp"]
+    println(size(gp["r"]))
+    gp_parametarized = gp_parametrize(gp)
+    gp_dA1 = @timed gp_parametrize_dA1(gp_parametarized, sys)
+    # gp_dA = @timed gp_parametrize_dA(gp_parametarized, sys)
+    # @info "timing " gp_dA[2] gp_dA1[2]
+    # gp_dA = gp_dA[1]
+    gp_dA1 = gp_dA1[1]
+    path_len = gp_parametarized.fmax-gp_parametarized.fmin
+    gp_step = (gp_parametarized.fmax-gp_parametarized.fmin)/20
+    for i in gp_parametarized.fmin+gp_step:gp_step:gp_parametarized.fmax-gp_step
+        iso_k = principal_curvatures_and_directions(gp_parametarized[i], sys)
+        mean_k = isosurface_mean_curvature_at_point(gp_parametarized[i], sys)
+        println("mean_k = ", mean_k, " at $i (of $path_len) (iso_k = ", iso_k[1][1], " and ", iso_k[1][2], ")")
+        # println("gp dA = ", gp_dA[i])
+        println("gp dA1 = ", gp_dA1[i])
+    end
+    # println(integrate_dgb(gp_parametarized, sys, 1.0, [x->1, sys["rho"]]))
+    # plot_results(sys, extra_gps=[gp])
+end
+
+
+function element_midpoints_and_areas(mesh)
+    midpoints = []
+    areas = []
+
+    for element in 1:nelements(mesh.topology)
+        vertices = [mesh.vertices[i] for i in element]
+
+        # Calculate midpoint
+        midpoint = sum(vertices) / length(vertices)
+        push!(midpoints, midpoint)
+
+        # Calculate area
+        if length(vertices) == 3  # Triangle
+            v1, v2, v3 = vertices
+            area = 0.5 * norm(cross(v2 - v1, v3 - v1))
+        elseif length(vertices) == 4  # Quadrangle
+            v1, v2, v3, v4 = vertices
+            area = 0.5 * (norm(cross(v2 - v1, v3 - v1)) + norm(cross(v3 - v1, v4 - v1)))
+        else
+            error("Unsupported element type")
+        end
+        push!(areas, area)
+    end
+
+    return midpoints, areas
+end
+
+function test_gp_only_gba(sys)
+    nuclear_cps = [a for a in sys["atoms"]]
+    f_list = [x->1, sys["rho"]]
+    for (ncpi,ncp) in enumerate(nuclear_cps)
+        closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
+        radius = 0.2closest_bond_distance
+        gps_threads = [ [] for i=1:Threads.nthreads() ]
+        num_points_list = [40]
+        @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
+        for num_points in num_points_list
+            sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
+            num_points = length(sphere)
+            elem_area = 4 * pi * radius^2 / num_points
+            # loop over sphere points
+            int_vals = zeros(length(f_list))
+            pm = Progress(num_points, "Atom $(ncp["data"].name) $ncpi: Seeding $num_points gradient paths...")
+            Threads.@threads for p in sphere
+                # find gradient path
+                gp = create_gradient_path(sys, p, 1, 1e-3)
+                gp1 = create_gradient_path(sys, p, -1, 1e-3)
+                gp["r"] = vcat(reverse(gp["r"], dims=1), gp1["r"][2:end, :])
+                gp["start_cp"] = gp1["end_cp"]
+                # push!(gps_threads[Threads.threadid()], gp)
+                # parametrize gradient path
+                gp_parametarized = gp_parametrize(gp)
+                # integrate
+                int_val = integrate_dgb(gp_parametarized, sys, elem_area, [x->1, sys["rho"]])
+                int_vals .+= int_val
+                next!(pm)
+            end
+            finish!(pm)
+            @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: int_vals = $int_vals"
+        end
+        # gps = []
+        # [push!(gps, gp) for th in gps_threads for gp in th]
+        # return plot_results(sys, extra_gps=gps)
+        break
+    end
+end
+
+function points_on_sphere_regular(N::Int, center::Vector{Float32}, radius::Float64)
+    points = []
+    Ncount = 0
+
+    a = 4 * pi / N
+    d = sqrt(a)
+    M_theta = round(pi / d)
+    d_theta = pi / M_theta
+
+    for m in 0:(M_theta - 1)
+        theta = pi * (m + 0.5) / M_theta
+        M_phi = round(2 * pi * sin(theta) / d_theta)
+
+        for n in 0:(M_phi - 1)
+            phi = 2 * n * pi / M_phi
+            x = radius * sin(theta) * cos(phi) + center[1]
+            y = radius * sin(theta) * sin(phi) + center[2]
+            z = radius * cos(theta) + center[3]
+            push!(points, [x; y; z])
+            Ncount += 1
+        end
+    end
+
+    return points
+end
+
+
+function plot_regular_points_on_sphere(N::Int, center::Tuple{Float64, Float64, Float64}, radius::Float64)
+    points = points_on_sphere_regular(N, center, radius)
+
+    x_coords = [point[1] for point in points]
+    y_coords = [point[2] for point in points]
+    z_coords = [point[3] for point in points]
+
+    trace = scatter3d(x=x_coords, y=y_coords, z=z_coords,
+                      mode="markers",
+                      marker=attr(size=5, line=attr(color="rgba(0, 0, 0, 0.5)", width=0.5)))
+    
+    layout = Layout(scene=attr(xaxis_title="X", yaxis_title="Y", zaxis_title="Z"),
+                    title="Regular Points on Sphere")
+
+    plot(trace, layout)
+end
+
+
+
+function points_on_sphere_random(center::Tuple{Float64, Float64, Float64}, radius::Float64, n_points::Int)
+    # Initialize an empty array to store the points
+    points = []
+
+    # Generate points on the sphere
+    for i in 1:n_points
+        theta = 2 * pi * rand()
+        phi = acos(1 - 2 * rand())
+        x = center[1] + radius * sin(phi) * cos(theta)
+        y = center[2] + radius * sin(phi) * sin(theta)
+        z = center[3] + radius * cos(phi)
+        push!(points, (x, y, z))
+        @info "point" theta  phi  x  y  z
+    end
+
+    return points
+end
 
 # main()
 # @profview main()
