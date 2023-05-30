@@ -3,7 +3,7 @@
 # return
 
 using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras, ModularIndices, Random, Distributions
-using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter
+using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter, StatsBase
 
 atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#3050F8",
                "#FF0D0D","#90E050","#B3E3F5","#AB5CF2","#8AFF00","#BFA6A6","#F0C8A0",
@@ -65,7 +65,6 @@ function import_cub(fname)
         "fIJK" => fIJK,
         "atoms" => atoms,
         "rho_data" => data)
-    # out["rho(x,y,z)"] = Interpolations.scale(extrapolate(interpolate(out["rho_data"], BSpline(Quadratic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
     out["rho(x,y,z)"] = Interpolations.scale(extrapolate(interpolate(out["rho_data"], BSpline(Quadratic(Interpolations.Flat(OnCell())))), Interpolations.Flat()), g[1], g[2], g[3])
     out["rho"] = (r) -> out["rho(x,y,z)"](r[1], r[2], r[3])
     out["rho!"] = (F, r) -> (F = out["rho"](r))
@@ -433,7 +432,7 @@ function main()
     # sys["interatomic_surfaces"] = find_saddle_surfaces(sys, -1)
     sys["ring_surfaces"] = find_saddle_surfaces(sys, 1)
 
-    # plot_results(sys)
+    plot_results(sys)
 
     return sys
 end
@@ -674,27 +673,23 @@ function plot_parameterized_gps(sys)
 end
 
 function principal_curvatures_and_directions(point, sys)
-    rho = sys["rho"]
+    # rho = sys["rho"]
     grad = sys["grad"]
     hess = sys["hess"]
 
-    rho_value = rho(point) # [e/bohr^3]
+    # rho_value = rho(point) # [e/bohr^3]
     grad_value = grad(point) # [e/bohr^4]
-    grad_norm = norm(grad_value) 
-    hess_value = hess(point) # [e/bohr^5]
-
-    # Normalizing the gradient to obtain the normal vector.
-    normal_vector = normalize(grad_value)
+    n = norm(grad_value) 
+    H = hess(point) # [e/bohr^5]
 
     # Creating the projection matrix.
-    P = I - normal_vector * normal_vector'
+    P = I - n * n'
 
-    # Projecting the Hessian onto the tangent plane, negating it and normalizing it by the gradient norm.
-    # e/bohr^5 / ([e/bohr^4]) [=] 1/bohr, units of curvature
-    W = - P * hess_value * P / grad_norm
+    # Projecting the Hessian onto the tangent plane and negating it (to indicate that we're interested in curvature inward towards regions of lower electron density)
+    Hp = - P * H * P
 
     # Finding the eigenvalues and eigenvectors of the Weingarten matrix.
-    eigen_decomposition = eigen(W)
+    eigen_decomposition = eigen(Hp)
 
     # Getting the indices that would sort the eigenvalues by their absolute values in descending order.
     sorted_indices = sortperm(abs.(eigen_decomposition.values), rev=true)
@@ -706,6 +701,58 @@ function principal_curvatures_and_directions(point, sys)
     return principal_curvatures, principal_directions
 end
 
+# function principal_curvatures_and_directions1(r, sys)
+#     # Compute gradient and hessian at r
+#     grad = sys["grad"]
+#     hess = sys["hess"]
+#     grad_rho = grad(r)
+#     hessian_rho = hess(r)
+
+#     # Compute the shape operator
+#     S = - hessian_rho / norm(grad_rho)
+
+#     # Compute the eigenvalues and eigenvectors of the shape operator
+#     e = eigen(S)
+
+#     # Sort indices based on the absolute inner products of eigenvectors with gradient (in ascending order)
+#     sorted_indices = sortperm(1:3, by = i -> abs(dot(grad_rho, e.vectors[:, i])))
+
+#     # Select the two smallest absolute value inner product eigenvalues and their corresponding eigenvectors
+#     principal_curvatures = e.values[sorted_indices[1:2]]
+#     principal_directions = e.vectors[:, sorted_indices[1:2]]
+
+#     return principal_curvatures, principal_directions
+# end
+
+# function principal_curvatures_and_directions2(point, sys)
+#     rho = sys["rho"]
+#     grad = sys["grad"]
+#     hess = sys["hess"]
+
+#     rho_value = rho(point) # [e/bohr^3]
+#     grad_value = grad(point) # [e/bohr^4]
+#     grad_norm = norm(grad_value) 
+#     hess_value = hess(point) # [e/bohr^5]
+
+#     # Normalizing the gradient to obtain the normal vector.
+#     normal_vector = normalize(grad_value)
+
+#     # Projecting the Hessian onto the tangent plane, negating it and normalizing it by the gradient norm.
+#     # e/bohr^5 / ([e/bohr^4]) [=] 1/bohr, units of curvature
+#     W = -inv(hess_value) * grad_value * normal_vector'
+
+#     # Finding the eigenvalues and eigenvectors of the Weingarten matrix.
+#     eigen_decomposition = eigen(W)
+
+#     # Getting the indices that would sort the eigenvalues by their absolute values in descending order.
+#     sorted_indices = sortperm(abs.(eigen_decomposition.values), rev=true)
+
+#     # Selecting the two largest absolute value eigenvalues and their corresponding eigenvectors.
+#     principal_curvatures = eigen_decomposition.values[sorted_indices][1:2]
+#     principal_directions = eigen_decomposition.vectors[:, sorted_indices]
+
+#     return principal_curvatures, principal_directions
+# end
 
 
 function isosurface_mean_curvature_at_point(point, sys)
@@ -830,11 +877,12 @@ end
 function test_gp_only_gba(sys)
     nuclear_cps = [a for a in sys["atoms"]]
     f_list = [x->1, sys["rho"]]
+    f_names = ["V", "ρ"]
     for (ncpi,ncp) in enumerate(nuclear_cps)
         closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
         radius = 0.2closest_bond_distance
         gps_threads = [ [] for i=1:Threads.nthreads() ]
-        num_points_list = [40]
+        num_points_list = [24, 128, 1024, 4096]
         @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
         for num_points in num_points_list
             sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
@@ -842,6 +890,7 @@ function test_gp_only_gba(sys)
             elem_area = 4 * pi * radius^2 / num_points
             # loop over sphere points
             int_vals = zeros(length(f_list))
+            gp_int_vals = []
             pm = Progress(num_points, "Atom $(ncp["data"].name) $ncpi: Seeding $num_points gradient paths...")
             Threads.@threads for p in sphere
                 # find gradient path
@@ -853,19 +902,41 @@ function test_gp_only_gba(sys)
                 # parametrize gradient path
                 gp_parametarized = gp_parametrize(gp)
                 # integrate
-                int_val = integrate_dgb(gp_parametarized, sys, elem_area, [x->1, sys["rho"]])
+                int_val = integrate_dgb(gp_parametarized, sys, elem_area, f_list)
+                push!(gp_int_vals, int_val)
                 int_vals .+= int_val
                 next!(pm)
             end
             finish!(pm)
-            @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: int_vals = $int_vals"
+            # @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: int_vals = $int_vals"
+            # print stats of each column of gp_int_vals with n, min, max, mean, std
+            gp_int_vals = hcat(gp_int_vals...)
+            gp_int_vals_stats = [sum(gp_int_vals, dims=2), minimum(gp_int_vals, dims=2), maximum(gp_int_vals, dims=2), mean(gp_int_vals, dims=2), std(gp_int_vals, dims=2)]
+
+            formatted_stats = "Sum: $(gp_int_vals_stats[1]), Min: $(gp_int_vals_stats[2]), Max: $(gp_int_vals_stats[3]), Mean: $(gp_int_vals_stats[4]), Std: $(gp_int_vals_stats[5])"
+
+            @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: gp_int_vals_stats for functions $(join(f_names, ", ")) = $formatted_stats"
+
+
         end
         # gps = []
         # [push!(gps, gp) for th in gps_threads for gp in th]
         # return plot_results(sys, extra_gps=gps)
-        break
+        # if ncpi >=8
+            break
+        # end
     end
 end
+
+# [ Info: Checking resolutions [24, 128, 1024, 4096] for atom Carbon 1 at Float32[-1.687072, -1.687072, -1.687072]...
+# Atom Carbon 1: Seeding 20 gradient paths... 100% Time: 0:02:30
+# [ Info: Atom Carbon 1 with 20 GPs: gp_int_vals_stats for functions V, ρ = Sum: [25.90793607722703; 32.81978969400329;;], Min: [-3.452307908272171; 0.943696456824771;;], Max: [3.4602734411514215; 3.413345289860068;;], Mean: [1.2953968038613515; 1.6409894847001645;;], Std: [1.7674442924731328; 0.6265669114411503;;]
+# Atom Carbon 1: Seeding 128 gradient paths... 100% Time: 0:16:32
+# [ Info: Atom Carbon 1 with 128 GPs: gp_int_vals_stats for functions V, ρ = Sum: [35.13495011305954; 33.773062426097695;;], Min: [-0.32869214073534364; 0.1561714018918065;;], Max: [0.660330759264329; 0.6441946436549573;;], Mean: [0.27449179775827764; 0.26385205020388824;;], Std: [0.1312774516655372; 0.09363891767141092;;]
+# Atom Carbon 1: Seeding 998 gradient paths... 100% Time: 2:37:56
+# [ Info: Atom Carbon 1 with 998 GPs: gp_int_vals_stats for functions V, ρ = Sum: [34.699092280424075; 33.82115900948734;;], Min: [-0.15722844216165358; 0.01713763184392208;;], Max: [0.12401887860408875; 0.11462884555294456;;], Mean: [0.03476862953950308; 0.033888936883253847;;], Std: [0.019705063640001453; 0.01221671012780067;;]
+# Atom Carbon 1: Seeding 4136 gradient paths... 100% Time: 8:57:55
+# [ Info: Atom Carbon 1 with 4136 GPs: gp_int_vals_stats for functions V, ρ = Sum: [34.79064604109993; 33.836057358517884;;], Min: [-0.037306127545212876; 0.004261891394502226;;], Max: [0.03333179857562209; 0.029686384174541364;;], Mean: [0.008411664903554142; 0.008180864931943395;;], Std: [0.004618431977415803; 0.002951058361225472;;]
 
 function points_on_sphere_regular(N::Int, center::Vector{Float32}, radius::Float64)
     points = []
