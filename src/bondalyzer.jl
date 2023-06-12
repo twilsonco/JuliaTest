@@ -4,6 +4,7 @@
 
 using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras, ModularIndices, Random, Distributions
 using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter, StatsBase
+using PyFormattedStrings
 
 atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#3050F8",
                "#FF0D0D","#90E050","#B3E3F5","#AB5CF2","#8AFF00","#BFA6A6","#F0C8A0",
@@ -672,87 +673,27 @@ function plot_parameterized_gps(sys)
     PlotlyJS.plot(plot_traces, layout)
 end
 
-function principal_curvatures_and_directions(point, sys)
-    # rho = sys["rho"]
-    grad = sys["grad"]
-    hess = sys["hess"]
 
-    # rho_value = rho(point) # [e/bohr^3]
-    grad_value = grad(point) # [e/bohr^4]
-    n = norm(grad_value) 
-    H = hess(point) # [e/bohr^5]
+function principal_curvatures_and_directions(r, sys)
+    # Compute gradient and hessian at r
+    grad_rho = sys["grad"](r)
+    hessian_rho = sys["hess"](r)
 
-    # Creating the projection matrix.
-    P = I - n * n'
+    # Compute the shape operator
+    S = - hessian_rho / norm(grad_rho)
 
-    # Projecting the Hessian onto the tangent plane and negating it (to indicate that we're interested in curvature inward towards regions of lower electron density)
-    Hp = - P * H * P
+    # Compute the eigenvalues and eigenvectors of the shape operator
+    e = eigen(S)
 
-    # Finding the eigenvalues and eigenvectors of the Weingarten matrix.
-    eigen_decomposition = eigen(Hp)
+    # Sort indices based on the absolute inner products of eigenvectors with gradient (in ascending order)
+    sorted_indices = sortperm(1:3, by = i -> abs(dot(grad_rho, e.vectors[:, i])))
 
-    # Getting the indices that would sort the eigenvalues by their absolute values in descending order.
-    sorted_indices = sortperm(abs.(eigen_decomposition.values), rev=true)
-
-    # Selecting the two largest absolute value eigenvalues and their corresponding eigenvectors.
-    principal_curvatures = eigen_decomposition.values[sorted_indices][1:2]
-    principal_directions = eigen_decomposition.vectors[:, sorted_indices]
+    # Select the two smallest absolute value inner product eigenvalues and their corresponding eigenvectors
+    principal_curvatures = e.values[sorted_indices[1:2]]
+    principal_directions = e.vectors[:, sorted_indices[1:2]]
 
     return principal_curvatures, principal_directions
 end
-
-# function principal_curvatures_and_directions1(r, sys)
-#     # Compute gradient and hessian at r
-#     grad = sys["grad"]
-#     hess = sys["hess"]
-#     grad_rho = grad(r)
-#     hessian_rho = hess(r)
-
-#     # Compute the shape operator
-#     S = - hessian_rho / norm(grad_rho)
-
-#     # Compute the eigenvalues and eigenvectors of the shape operator
-#     e = eigen(S)
-
-#     # Sort indices based on the absolute inner products of eigenvectors with gradient (in ascending order)
-#     sorted_indices = sortperm(1:3, by = i -> abs(dot(grad_rho, e.vectors[:, i])))
-
-#     # Select the two smallest absolute value inner product eigenvalues and their corresponding eigenvectors
-#     principal_curvatures = e.values[sorted_indices[1:2]]
-#     principal_directions = e.vectors[:, sorted_indices[1:2]]
-
-#     return principal_curvatures, principal_directions
-# end
-
-# function principal_curvatures_and_directions2(point, sys)
-#     rho = sys["rho"]
-#     grad = sys["grad"]
-#     hess = sys["hess"]
-
-#     rho_value = rho(point) # [e/bohr^3]
-#     grad_value = grad(point) # [e/bohr^4]
-#     grad_norm = norm(grad_value) 
-#     hess_value = hess(point) # [e/bohr^5]
-
-#     # Normalizing the gradient to obtain the normal vector.
-#     normal_vector = normalize(grad_value)
-
-#     # Projecting the Hessian onto the tangent plane, negating it and normalizing it by the gradient norm.
-#     # e/bohr^5 / ([e/bohr^4]) [=] 1/bohr, units of curvature
-#     W = -inv(hess_value) * grad_value * normal_vector'
-
-#     # Finding the eigenvalues and eigenvectors of the Weingarten matrix.
-#     eigen_decomposition = eigen(W)
-
-#     # Getting the indices that would sort the eigenvalues by their absolute values in descending order.
-#     sorted_indices = sortperm(abs.(eigen_decomposition.values), rev=true)
-
-#     # Selecting the two largest absolute value eigenvalues and their corresponding eigenvectors.
-#     principal_curvatures = eigen_decomposition.values[sorted_indices][1:2]
-#     principal_directions = eigen_decomposition.vectors[:, sorted_indices]
-
-#     return principal_curvatures, principal_directions
-# end
 
 
 function isosurface_mean_curvature_at_point(point, sys)
@@ -813,7 +754,7 @@ function integrate_dgb(gp, sys, a_0, f_list)
     gp_dA = gp_parametrize_dA1(gp, sys)
     for i in 1:length(f_list)
         f(x) = gp_dA[x] * f_list[i](gp[x])
-        out[i] = quadgk(f, gp.fmin, gp.fmax)[1] * a_0
+        out[i] = quadgk(f, gp.fmin+0.05, gp.fmax)[1] * a_0
     end
     return out
 end
@@ -821,8 +762,8 @@ end
 function test_isosurface_curvature_for_gp(sys)
     # gp = create_gradient_path(sys, [1; 1; 1], 1, 1e-3)
     # gp1 = create_gradient_path(sys, [1; 1; 1], -1, 1e-3)
-    gp = create_gradient_path(sys, [1; 1; 3], 1, 1e-3)
-    gp1 = create_gradient_path(sys, [1; 1; 3], -1, 1e-3)
+    gp = create_gradient_path(sys, [0; 0; 0.5], 1, 1e-3)
+    gp1 = create_gradient_path(sys, [0; 0; 0.5], -1, 1e-3)
     println(size(gp["r"]))
     gp["r"] = vcat(reverse(gp["r"], dims=1), gp1["r"][2:end, :])
     gp["start_cp"] = gp1["end_cp"]
@@ -834,13 +775,29 @@ function test_isosurface_curvature_for_gp(sys)
     # gp_dA = gp_dA[1]
     gp_dA1 = gp_dA1[1]
     path_len = gp_parametarized.fmax-gp_parametarized.fmin
-    gp_step = (gp_parametarized.fmax-gp_parametarized.fmin)/20
-    for i in gp_parametarized.fmin+gp_step:gp_step:gp_parametarized.fmax-gp_step
+    gp_step = path_len/20
+    println("Isosurface mean curvatures along a gradient path from atom to cage")
+    for i in gp_parametarized.fmin+gp_step/100:gp_step/3:gp_parametarized.fmax/4-gp_step
         iso_k = principal_curvatures_and_directions(gp_parametarized[i], sys)
         mean_k = isosurface_mean_curvature_at_point(gp_parametarized[i], sys)
-        println("mean_k = ", mean_k, " at $i (of $path_len) (iso_k = ", iso_k[1][1], " and ", iso_k[1][2], ")")
+        rho = sys["rho"](gp_parametarized[i])
+        diff = mean_k - 1/i
+        # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
+        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
         # println("gp dA = ", gp_dA[i])
-        println("gp dA1 = ", gp_dA1[i])
+        # println("gp dA1 = ", gp_dA1[i])
+    end
+    println()
+    for i in gp_parametarized.fmin+15gp_step:gp_step/3:gp_parametarized.fmax
+        iso_k = principal_curvatures_and_directions(gp_parametarized[i], sys)
+        mean_k = isosurface_mean_curvature_at_point(gp_parametarized[i], sys)
+        rho = sys["rho"](gp_parametarized[i])
+        len=gp_parametarized.fmax-i
+        diff = -mean_k - 1/len
+        # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
+        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len:0.03F} from cage CP (of {path_len:0.03F})")
+        # println("gp dA = ", gp_dA[i])
+        # println("gp dA1 = ", gp_dA1[i])
     end
     # println(integrate_dgb(gp_parametarized, sys, 1.0, [x->1, sys["rho"]]))
     # plot_results(sys, extra_gps=[gp])
@@ -882,7 +839,7 @@ function test_gp_only_gba(sys)
         closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
         radius = 0.2closest_bond_distance
         gps_threads = [ [] for i=1:Threads.nthreads() ]
-        num_points_list = [24, 128, 1024, 4096]
+        num_points_list = [24, 128]
         @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
         for num_points in num_points_list
             sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
