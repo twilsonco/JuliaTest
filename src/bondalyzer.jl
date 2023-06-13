@@ -3,7 +3,7 @@
 # return
 
 using Parsers, PeriodicTable, PlotlyJS, SplitApplyCombine, LoggingFormats, LoggingExtras, ModularIndices, Random, Distributions
-using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter, StatsBase
+using Interpolations, NLsolve, LinearAlgebra, AngleBetweenVectors, DifferentialEquations, Rotations, Optim, Meshes, QuadGK, ProgressMeter, StatsBase, Cubature
 using PyFormattedStrings
 
 atom_colors = ("#FFFFFF","#D9FFFF","#CC80FF","#C2FF00","#FFB5B5","#909090","#3050F8",
@@ -342,17 +342,17 @@ function plot_results(sys; extra_paths=[], extra_points=[], extra_gps=[])
     # end
 
     # ring surfaces
-    C = ["black","red","blue","green","yellow","orange"]
-    for (i,rs) in enumerate(sys["ring_surfaces"])
-        for (j,gp) in enumerate(rs)
-            push!(traces, PlotlyJS.scatter(x=gp["r"][:,1], y=gp["r"][:,2], z=gp["r"][:,3],
-                        # line=attr(color=C[Mod(j)], width=2),
-                        line=attr(color="green", width=2),
-                        type = "scatter3d", legend=false,
-                        mode = "lines"))
-        end
-        break
-    end
+    # C = ["black","red","blue","green","yellow","orange"]
+    # for (i,rs) in enumerate(sys["ring_surfaces"])
+    #     for (j,gp) in enumerate(rs)
+    #         push!(traces, PlotlyJS.scatter(x=gp["r"][:,1], y=gp["r"][:,2], z=gp["r"][:,3],
+    #                     # line=attr(color=C[Mod(j)], width=2),
+    #                     line=attr(color="green", width=2),
+    #                     type = "scatter3d", legend=false,
+    #                     mode = "lines"))
+    #     end
+    #     break
+    # end
 
     # nuclear coordinates
     r = invert([a["r"] for a in sys["atoms"]])
@@ -713,7 +713,7 @@ end
 
 function dA(gp, sys, s; a = gp.fmin)
     f(x) = 2 * isosurface_mean_curvature_at_point(gp[x], sys)
-    return quadgk(f, a, s)[1]
+    return exp(quadgk(f, a, s)[1])
 end
 
 # for precomputing the dA values
@@ -754,9 +754,138 @@ function integrate_dgb(gp, sys, a_0, f_list)
     gp_dA = gp_parametrize_dA1(gp, sys)
     for i in 1:length(f_list)
         f(x) = gp_dA[x] * f_list[i](gp[x])
-        out[i] = quadgk(f, gp.fmin+0.05, gp.fmax)[1] * a_0
+        out[i] = quadgk(f, gp.fmin, gp.fmax)[1] * a_0
     end
     return out
+end
+
+function integrate_sphere_1d(f, center, radius)
+    integrals = []
+    errors = []
+    dir_vecs = [[1,0,0], [0,1,0], [0,0,1], normalize([1,1,1])]
+    for i in dir_vecs
+        function f_1d(r)
+            # scale the value at each point to account for the spherical symmetry
+            val = f([center[1], center[2], center[3]] .+ (r * i))
+            scaled_val = val * 4π * r^2  # scaling factor for a sphere
+            return scaled_val
+        end
+        integral, error = quadgk(f_1d, 0.0, radius)
+        push!(integrals, integral)
+        push!(errors, error)
+    end
+    integral = mean(integrals)
+    error = mean(errors)
+    return integral, error
+end
+
+
+
+
+# function integrate_sphere_monte_carlo(f, center, radius; tolerance = 1e-6, max_iterations = 1e6)
+#     count = 0.0
+#     total = 0.0
+#     square_total = 0.0
+#     i = 0
+#     error = Inf
+#     mean = 0.0
+#     value = 0.0
+#     while error > tolerance && i < max_iterations || i < 1000
+#         i += 1
+#         # Generate a random point inside the cube of side length 2*radius
+#         point = center .+ (radius .* (2 .* rand(3) .- 1))
+#         if norm(point - center) <= radius
+#             value = f(point)
+#             total += value
+#             square_total += value^2
+#             count += 1.0
+#             mean = total / count
+#             variance = (square_total / count) - mean^2
+#             error = sqrt(variance / count)
+#         end
+#         if i % 10000000 == 0
+#             integral = (4/3)*pi*radius^3 * mean
+#             @info "step" Float32(i) max_iterations total mean count error integral
+#         end
+#     end
+#     # Multiply by the volume of the sphere to get the integral
+#     mean = total / count
+#     variance = (square_total / count) - mean^2
+#     error = sqrt(variance / count)
+#     integral = (4/3)*pi*radius^3 * mean
+#     @info "step" Float32(i) max_iterations total mean count error integral
+#     return integral, error
+# end
+
+function integrate_sphere_monte_carlo_par(f, center, radius; tolerance = 1e-7, max_iterations = 1e7)
+    nthreads = Threads.nthreads()
+
+    totals = zeros(nthreads)
+    square_totals = zeros(nthreads)
+    counts = zeros(Int64, nthreads)
+
+    Threads.@threads for i in 1:max_iterations
+        tid = Threads.threadid()
+        # Generate a random point inside the cube of side length 2*radius
+        point = center .+ (radius .* (2 .* rand(3) .- 1))
+        if norm(point - center) <= radius
+            value = f(point)
+            totals[tid] += value
+            square_totals[tid] += value^2
+            counts[tid] += 1
+        end
+
+        # only thread 0 checks for convergence and iteration limit
+        if tid == 1
+            if counts[1] % 5000000 == 0
+                total = sum(totals)
+                square_total = sum(square_totals)
+                count = sum(counts)
+                mean = total / count
+                variance = (square_total / count) - mean^2
+                error = sqrt(abs(variance)/count)
+                integral = (4/3)*pi*radius^3 * mean
+                # @info "step" Float32(i) max_iterations total mean count error integral
+
+                if error < tolerance
+                    # @info "After $count steps: integral estimate = $mean ± $error"
+                    return integral, error
+                end
+            end
+        end
+    end
+    # If the loop completes without returning, compute the final integral and error and return.
+    total = sum(totals)
+    square_total = sum(square_totals)
+    count = sum(counts)
+    mean = total / count
+    variance = (square_total / count) - mean^2
+    error = sqrt(abs(variance)/count)
+    integral = (4/3)*pi*radius^3 * mean
+    # @info "After $count steps: integral estimate = $mean ± $error"
+    return integral, error
+end
+
+
+
+
+
+
+
+
+function test_sphere_integration(sys)
+    # integrate sphere for each nuclear critical point
+    f(r) = sys["rho"](r)
+    total = 0.0
+    for cp in sys["critical_points"]
+        if cp["rank"] == -3
+            integral, error = integrate_sphere_1d(f, cp["r"], 1.0)
+            integral3d, error3d = integrate_sphere_monte_carlo_par(f, cp["r"], 1.0)
+            total += integral3d
+            @info "Integrating sphere 1d" cp["rank"] f(cp["r"]) integral error integral3d error3d
+        end
+    end
+    # @info "Total integral" total integrate_sphere_monte_carlo_par(f, [0, 0, 0], 8, max_iterations=1e9)
 end
 
 function test_isosurface_curvature_for_gp(sys)
@@ -785,7 +914,7 @@ function test_isosurface_curvature_for_gp(sys)
         # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
         println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
         # println("gp dA = ", gp_dA[i])
-        # println("gp dA1 = ", gp_dA1[i])
+        println("gp dA1 = ", gp_dA1[i])
     end
     println()
     for i in gp_parametarized.fmin+15gp_step:gp_step/3:gp_parametarized.fmax
@@ -797,7 +926,7 @@ function test_isosurface_curvature_for_gp(sys)
         # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
         println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len:0.03F} from cage CP (of {path_len:0.03F})")
         # println("gp dA = ", gp_dA[i])
-        # println("gp dA1 = ", gp_dA1[i])
+        println("gp dA1 = ", gp_dA1[i])
     end
     # println(integrate_dgb(gp_parametarized, sys, 1.0, [x->1, sys["rho"]]))
     # plot_results(sys, extra_gps=[gp])
@@ -837,35 +966,46 @@ function test_gp_only_gba(sys)
     f_names = ["V", "ρ"]
     for (ncpi,ncp) in enumerate(nuclear_cps)
         closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
-        radius = 0.2closest_bond_distance
-        gps_threads = [ [] for i=1:Threads.nthreads() ]
-        num_points_list = [24, 128]
+        radius = 0.2 * closest_bond_distance
+        num_points_list = [24]
         @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
         for num_points in num_points_list
             sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
             num_points = length(sphere)
             elem_area = 4 * pi * radius^2 / num_points
-            # loop over sphere points
-            int_vals = zeros(length(f_list))
+
+            # Sphere center
+            center = ncp["r"]
+            # Bounds for the triple integral
+            x_bounds = (center[1]-radius, center[1]+radius)
+            y_bounds = (center[2]-radius, center[2]+radius)
+            z_bounds = z -> sqrt(radius^2 - (z-center[1])^2 - (z-center[2])^2) .* [-1, 1]
+
+            # Perform sphere integration first
+            sphere_integrals = []
+            for f in f_list
+                f_sphere(x, y, z) = f(sqrt(x^2 + y^2 + z^2))
+                integral, error = quadgk((x,y,z) -> f_sphere(x,y,z), x_bounds..., y_bounds..., z_bounds...)
+                push!(sphere_integrals, integral)
+            end
+            @info "Sphere radius: $radius"
+            @info "Sphere integrals: $sphere_integrals"
+
+            # loop over sphere points for gradient path computations
             gp_int_vals = []
             pm = Progress(num_points, "Atom $(ncp["data"].name) $ncpi: Seeding $num_points gradient paths...")
             Threads.@threads for p in sphere
                 # find gradient path
-                gp = create_gradient_path(sys, p, 1, 1e-3)
-                gp1 = create_gradient_path(sys, p, -1, 1e-3)
-                gp["r"] = vcat(reverse(gp["r"], dims=1), gp1["r"][2:end, :])
-                gp["start_cp"] = gp1["end_cp"]
-                # push!(gps_threads[Threads.threadid()], gp)
+                gp = create_gradient_path(sys, p, -1, 1e-3)
                 # parametrize gradient path
                 gp_parametarized = gp_parametrize(gp)
                 # integrate
                 int_val = integrate_dgb(gp_parametarized, sys, elem_area, f_list)
                 push!(gp_int_vals, int_val)
-                int_vals .+= int_val
                 next!(pm)
             end
             finish!(pm)
-            # @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: int_vals = $int_vals"
+
             # print stats of each column of gp_int_vals with n, min, max, mean, std
             gp_int_vals = hcat(gp_int_vals...)
             gp_int_vals_stats = [sum(gp_int_vals, dims=2), minimum(gp_int_vals, dims=2), maximum(gp_int_vals, dims=2), mean(gp_int_vals, dims=2), std(gp_int_vals, dims=2)]
@@ -874,16 +1014,15 @@ function test_gp_only_gba(sys)
 
             @info "Atom $(ncp["data"].name) $ncpi with $num_points GPs: gp_int_vals_stats for functions $(join(f_names, ", ")) = $formatted_stats"
 
-
+            total_integrals = [gp_int_vals_stats[1][i] + sphere_integrals[i] for i in 1:length(f_list)]
+            @info "Total integrals (sphere + GP integrations) for functions $(join(f_names, ", ")) = $total_integrals"
         end
-        # gps = []
-        # [push!(gps, gp) for th in gps_threads for gp in th]
-        # return plot_results(sys, extra_gps=gps)
-        # if ncpi >=8
-            break
-        # end
     end
 end
+
+
+
+
 
 # [ Info: Checking resolutions [24, 128, 1024, 4096] for atom Carbon 1 at Float32[-1.687072, -1.687072, -1.687072]...
 # Atom Carbon 1: Seeding 20 gradient paths... 100% Time: 0:02:30
