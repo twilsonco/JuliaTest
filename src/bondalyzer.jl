@@ -423,7 +423,7 @@ function plot_results(sys; extra_paths=[], extra_points=[], extra_gps=[])
 end
 
 function main()
-    fname = "DrWatson Example/data/sims/adamantane-fine.cub"  
+    fname = "data/sims/adamantane-fine.cub"  
 
     sys = import_cub(fname)
     sys["critical_points"] = find_cps(sys, 0.8)
