@@ -911,7 +911,7 @@ function test_isosurface_curvature_for_gp(sys)
         rho = sys["rho"](gp_parametarized[i])
         diff = mean_k - 1/i
         println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
-        println("dA(s) = ", dA(gp_parametarized[i], sys, i))
+        println("dA(s) = ", dA(gp_parametarized, sys, i))
         println("dA-parameterized gp = ", gp_dA[i])
         println("dA-parameterized gp \"1\" = ", gp_dA1[i])
     end
@@ -924,7 +924,7 @@ function test_isosurface_curvature_for_gp(sys)
         diff = -mean_k - 1/len
         # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
         println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len-i:0.03F} from cage CP (of {path_len:0.03F})")
-        println("dA(s) = ", dA(gp_parametarized[i], sys, i))
+        println("dA(s) = ", dA(gp_parametarized, sys, i))
         println("dA-parameterized gp = ", gp_dA[i])
         println("dA-parameterized gp \"1\" = ", gp_dA1[i])
     end
