@@ -898,9 +898,9 @@ function test_isosurface_curvature_for_gp(sys)
     println(size(gp["r"]))
     gp_parametarized = gp_parametrize(gp)
     gp_dA1 = @timed gp_parametrize_dA1(gp_parametarized, sys)
-    # gp_dA = @timed gp_parametrize_dA(gp_parametarized, sys)
-    # @info "timing " gp_dA[2] gp_dA1[2]
-    # gp_dA = gp_dA[1]
+    gp_dA = @timed gp_parametrize_dA(gp_parametarized, sys)
+    @info "timing " gp_dA[2] gp_dA1[2]
+    gp_dA = gp_dA[1]
     gp_dA1 = gp_dA1[1]
     path_len = gp_parametarized.fmax-gp_parametarized.fmin
     gp_step = path_len/20
@@ -910,10 +910,10 @@ function test_isosurface_curvature_for_gp(sys)
         mean_k = isosurface_mean_curvature_at_point(gp_parametarized[i], sys)
         rho = sys["rho"](gp_parametarized[i])
         diff = mean_k - 1/i
-        # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
         println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
-        # println("gp dA = ", gp_dA[i])
-        println("gp dA1 = ", gp_dA1[i])
+        println("dA(s) = ", dA(gp_parametarized[i], sys, i))
+        println("dA-parameterized gp = ", gp_dA[i])
+        println("dA-parameterized gp \"1\" = ", gp_dA1[i])
     end
     println()
     for i in gp_parametarized.fmin+15gp_step:gp_step/3:gp_parametarized.fmax
@@ -923,9 +923,10 @@ function test_isosurface_curvature_for_gp(sys)
         len=gp_parametarized.fmax-i
         diff = -mean_k - 1/len
         # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
-        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len:0.03F} from cage CP (of {path_len:0.03F})")
-        # println("gp dA = ", gp_dA[i])
-        println("gp dA1 = ", gp_dA1[i])
+        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len-i:0.03F} from cage CP (of {path_len:0.03F})")
+        println("dA(s) = ", dA(gp_parametarized[i], sys, i))
+        println("dA-parameterized gp = ", gp_dA[i])
+        println("dA-parameterized gp \"1\" = ", gp_dA1[i])
     end
     # println(integrate_dgb(gp_parametarized, sys, 1.0, [x->1, sys["rho"]]))
     # plot_results(sys, extra_gps=[gp])
@@ -963,29 +964,33 @@ function test_gp_only_gba(sys)
     nuclear_cps = [a for a in sys["atoms"]]
     f_list = [x->1, sys["rho"]]
     f_names = ["V", "ρ"]
+    # set to store element number (integer) of processed atoms
+    processed_atoms = Set{Int}()
     for (ncpi,ncp) in enumerate(nuclear_cps)
+        # skip if already processed
+        if ncp["data"].number in processed_atoms
+            continue
+        end
+        # add element number to processed atoms
+        push!(processed_atoms, ncp["data"].number)
+
         closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
         radius = 0.2 * closest_bond_distance
-        num_points_list = [24]
+        num_points_list = [128]
         @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
         for num_points in num_points_list
             sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
             num_points = length(sphere)
             elem_area = 4 * pi * radius^2 / num_points
 
+
             # Sphere center
             center = ncp["r"]
-            # Bounds for the triple integral
-            x_bounds = (center[1]-radius, center[1]+radius)
-            y_bounds = (center[2]-radius, center[2]+radius)
-            z_bounds = z -> sqrt(radius^2 - (z-center[1])^2 - (z-center[2])^2) .* [-1, 1]
 
             # Perform sphere integration first
             sphere_integrals = []
             for f in f_list
-                f_sphere(x, y, z) = f(sqrt(x^2 + y^2 + z^2))
-                integral, error = quadgk((x,y,z) -> f_sphere(x,y,z), x_bounds..., y_bounds..., z_bounds...)
-                push!(sphere_integrals, integral)
+                push!(sphere_integrals, integrate_sphere_monte_carlo_par(f, center, radius)[1])
             end
             @info "Sphere radius: $radius"
             @info "Sphere integrals: $sphere_integrals"
