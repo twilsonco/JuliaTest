@@ -710,16 +710,21 @@ function make_sphere(point, radius, resolution=30)
     mesh = Meshes.discretize(sphere, RegularDiscretization(resolution, resolution))
 end
 
-function dA(gp, sys, s; a = gp.fmin)
+function dA(gp, sys, s, a_0; a = gp.fmin)
     f(x) = 2 * isosurface_mean_curvature_at_point(gp[x], sys)
-    return exp(quadgk(f, a, s)[1])
+    return a_0 * exp(quadgk(f, a, s)[1])
 end
 
-# for precomputing the dA values
-function gp_parametrize_dA(parameterized_gp, sys; interp_type=Interpolations.Quadratic)
-    path_step = parameterized_gp.fmax / 100
+function dA_H2_gp(gp, H_gp, s, a_0; a = gp.fmin)
+    f(x) = H_gp[x]
+    return a_0 * exp(quadgk(f, a, s)[1])
+end
+
+# for precomputing the 2H values
+function gp_parametrize_2H(parameterized_gp, sys; interp_type=Interpolations.Quadratic, num_points=1000)
+    path_step = parameterized_gp.fmax / num_points
     x = 0:path_step:parameterized_gp.fmax
-    y = [dA(parameterized_gp, sys, s) for s in x]
+    y = [2 * isosurface_mean_curvature_at_point(parameterized_gp[s], sys) for s in x]
     if interp_type == Interpolations.Linear
         return extrapolate(interpolate(x, y, Gridded(Linear())), Interpolations.Flat())
     else
@@ -728,15 +733,29 @@ function gp_parametrize_dA(parameterized_gp, sys; interp_type=Interpolations.Qua
     # return interpolate(rho_vals, path["r"], Gridded(Linear()))
 end
 
-function gp_parametrize_dA1(parameterized_gp, sys; interp_type=Interpolations.Quadratic)
-    path_step = parameterized_gp.fmax / 20
+# for precomputing the dA values
+function gp_parametrize_dA(parameterized_gp, sys, a_0; interp_type=Interpolations.Quadratic, num_points=200)
+    path_step = parameterized_gp.fmax / num_points
+    x = 0:path_step:parameterized_gp.fmax
+    y = [dA(parameterized_gp, sys, s, a_0) for s in x]
+    if interp_type == Interpolations.Linear
+        return extrapolate(interpolate(x, y, Gridded(Linear())), Interpolations.Flat())
+    else
+        return extrapolate(Interpolations.scale(interpolate(y, BSpline(interp_type(Interpolations.Line(OnGrid())))), x), Interpolations.Flat())
+    end
+    # return interpolate(rho_vals, path["r"], Gridded(Linear()))
+end
+
+function gp_parametrize_dA1(parameterized_gp, sys, a_0; interp_type=Interpolations.Quadratic, num_points=500)
+    path_step = parameterized_gp.fmax / num_points
     x = 0:path_step:parameterized_gp.fmax
     y = zeros(length(x))
-    for i in 1:length(x)
-        prev_sum = y[max(i-1,1)]
-        lower_limit = x[max(i-1,1)]
-        new_sum_component = dA(parameterized_gp, sys, x[i], a = lower_limit)
-        y[i] = prev_sum + new_sum_component
+    y[1] = dA(parameterized_gp, sys, x[1], a_0)
+    for i in 2:length(x)
+        prev_sum = y[i-1]
+        lower_limit = x[i-1]
+        new_sum = dA(parameterized_gp, sys, x[i], prev_sum, a = lower_limit)
+        y[i] = new_sum
         # check_val = dA(parameterized_gp, sys, x[i])
         # @info "step $i" prev_sum lower_limit new_sum_component y[i] check_val
     end
@@ -748,15 +767,46 @@ function gp_parametrize_dA1(parameterized_gp, sys; interp_type=Interpolations.Qu
     # return interpolate(rho_vals, path["r"], Gridded(Linear()))
 end
 
-function integrate_dgb(gp, sys, a_0, f_list)
+function gp_parametrize_dA2(parameterized_gp, H_gp, a_0; interp_type=Interpolations.Quadratic, num_points=500)
+    path_step = parameterized_gp.fmax / num_points
+    x = 0:path_step:parameterized_gp.fmax
+    y = zeros(length(x))
+    y[1] = dA_H2_gp(parameterized_gp, H_gp, x[1], a_0)
+    for i in 2:length(x)
+        prev_sum = y[i-1]
+        lower_limit = x[i-1]
+        new_sum = dA_H2_gp(parameterized_gp, H_gp, x[i], prev_sum, a = lower_limit)
+        y[i] = new_sum
+        # check_val = dA(parameterized_gp, sys, x[i])
+        # @info "step $i" prev_sum lower_limit new_sum_component y[i] check_val
+    end
+    if interp_type == Interpolations.Linear
+        return extrapolate(interpolate(x, y, Gridded(Linear())), Interpolations.Flat())
+    else
+        return extrapolate(Interpolations.scale(interpolate(y, BSpline(interp_type(Interpolations.Line(OnGrid())))), x), Interpolations.Flat())
+    end
+    # return interpolate(rho_vals, path["r"], Gridded(Linear()))
+end
+
+function integrate_dgb(gp, sys, a_0, f_list; gp_2H = gp_parametrize_2H(gp, sys, num_points=2000))
     out = zeros(length(f_list))
-    gp_dA = gp_parametrize_dA1(gp, sys)
+    gp_dA = gp_parametrize_dA2(gp, gp_2H, a_0)
     for i in 1:length(f_list)
         f(x) = gp_dA[x] * f_list[i](gp[x])
-        out[i] = quadgk(f, gp.fmin, gp.fmax)[1] * a_0
+        out[i] = quadgk(f, gp.fmin, gp.fmax)[1]
     end
     return out
 end
+
+# function integrate_dgb(gp, sys, a_0, f_list)
+#     out = zeros(length(f_list))
+#     gp_dA = gp_parametrize_dA1(gp, sys, a_0)
+#     for i in 1:length(f_list)
+#         f(x) = gp_dA[x] * f_list[i](gp[x])
+#         out[i] = quadgk(f, gp.fmin, gp.fmax)[1]
+#     end
+#     return out
+# end
 
 function integrate_sphere_1d(f, center, radius)
     integrals = []
@@ -888,8 +938,6 @@ function test_sphere_integration(sys)
 end
 
 function test_isosurface_curvature_for_gp(sys)
-    # gp = create_gradient_path(sys, [1; 1; 1], 1, 1e-3)
-    # gp1 = create_gradient_path(sys, [1; 1; 1], -1, 1e-3)
     gp = create_gradient_path(sys, [0; 0; 0.5], 1, 1e-3)
     gp1 = create_gradient_path(sys, [0; 0; 0.5], -1, 1e-3)
     println(size(gp["r"]))
@@ -897,11 +945,14 @@ function test_isosurface_curvature_for_gp(sys)
     gp["start_cp"] = gp1["end_cp"]
     println(size(gp["r"]))
     gp_parametarized = gp_parametrize(gp)
-    gp_dA1 = @timed gp_parametrize_dA1(gp_parametarized, sys)
-    gp_dA = @timed gp_parametrize_dA(gp_parametarized, sys)
-    @info "timing " gp_dA[2] gp_dA1[2]
-    gp_dA = gp_dA[1]
-    gp_dA1 = gp_dA1[1]
+    gp_2H = gp_parametrize_2H(gp_parametarized, sys, num_points=1000)
+    # gp_dA = @timed gp_parametrize_dA(gp_parametarized, sys, 0.01)
+    # gp_dA1 = @timed gp_parametrize_dA1(gp_parametarized, sys, 0.01)
+    # gp_dA2 = @timed gp_parametrize_dA2(gp_parametarized, gp_2H, 0.01)
+    # @info "timing " gp_dA1[2] gp_dA2[2]
+    # gp_dA = gp_dA[1]
+    # gp_dA1 = gp_dA1[1]
+    # gp_dA2 = gp_dA2[1]
     path_len = gp_parametarized.fmax-gp_parametarized.fmin
     gp_step = path_len/20
     println("Isosurface mean curvatures along a gradient path from atom to cage")
@@ -910,10 +961,12 @@ function test_isosurface_curvature_for_gp(sys)
         mean_k = isosurface_mean_curvature_at_point(gp_parametarized[i], sys)
         rho = sys["rho"](gp_parametarized[i])
         diff = mean_k - 1/i
-        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
-        println("dA(s) = ", dA(gp_parametarized, sys, i))
-        println("dA-parameterized gp = ", gp_dA[i])
-        println("dA-parameterized gp \"1\" = ", gp_dA1[i])
+        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F}, H_gp = {gp_2H[i]/2:0.03F}, 1/s = {1/i:0.03F}, diff = {diff:0.03F},  at s = {i:0.03F} from nuclear CP (of {path_len:0.03F})")
+        println("dA(s) = ", dA(gp_parametarized, sys, i, 0.01))
+        println("dA_H2_gp(s) = ", dA_H2_gp(gp_parametarized, gp_2H, i, 0.01))
+        # println("dA-parameterized gp = ", gp_dA[i])
+        # println("dA-parameterized gp \"1\" = ", gp_dA1[i])
+        # println("dA-parameterized gp \"2\" = ", gp_dA2[i])
     end
     println()
     for i in gp_parametarized.fmin+15gp_step:gp_step/3:gp_parametarized.fmax
@@ -922,11 +975,12 @@ function test_isosurface_curvature_for_gp(sys)
         rho = sys["rho"](gp_parametarized[i])
         len=gp_parametarized.fmax-i
         diff = -mean_k - 1/len
-        # println("rho = $(sys["rho"](gp_parametarized[i])) mean_k = ", mean_k, " at $i (of $path_len)")
-        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F} (), 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len-i:0.03F} from cage CP (of {path_len:0.03F})")
-        println("dA(s) = ", dA(gp_parametarized, sys, i))
-        println("dA-parameterized gp = ", gp_dA[i])
-        println("dA-parameterized gp \"1\" = ", gp_dA1[i])
+        println(f"rho(s) = {rho:0.03F}, H = {mean_k:0.03F}, H_gp = {gp_2H[i]/2:0.03F}, 1/s = {1/len:0.03F}, diff = {diff:0.03F},  at s = {len:0.03F} from cage CP (of {path_len:0.03F})")
+        println("dA(s) = ", dA(gp_parametarized, sys, i, 0.01))
+        println("dA_H2_gp(s) = ", dA_H2_gp(gp_parametarized, gp_2H, i, 0.01))
+        # println("dA-parameterized gp = ", gp_dA[i])
+        # println("dA-parameterized gp \"1\" = ", gp_dA1[i])
+        # println("dA-parameterized gp \"2\" = ", gp_dA2[i])
     end
     # println(integrate_dgb(gp_parametarized, sys, 1.0, [x->1, sys["rho"]]))
     # plot_results(sys, extra_gps=[gp])
@@ -966,17 +1020,18 @@ function test_gp_only_gba(sys)
     f_names = ["V", "ρ"]
     # set to store element number (integer) of processed atoms
     processed_atoms = Set{Int}()
+    integral_totals = [0.0 for f in f_list]
     for (ncpi,ncp) in enumerate(nuclear_cps)
         # skip if already processed
-        if ncp["data"].number in processed_atoms
-            continue
-        end
+        # if ncp["data"].number in processed_atoms
+        #     continue
+        # end
         # add element number to processed atoms
         push!(processed_atoms, ncp["data"].number)
 
         closest_bond_distance = minimum([ norm(cpi["r"] - ncp["r"]) for cpi in sys["critical_points"] if cpi["rank"] == -1 ])
         radius = 0.2 * closest_bond_distance
-        num_points_list = [128]
+        num_points_list = [1024]
         @info "Checking resolutions $num_points_list for atom $(ncp["data"].name) $ncpi at $(ncp["r"])..."
         for num_points in num_points_list
             sphere = points_on_sphere_regular(num_points, ncp["r"], radius)
@@ -1009,6 +1064,7 @@ function test_gp_only_gba(sys)
                 next!(pm)
             end
             finish!(pm)
+            println("size of gp_int_vals = ", size(gp_int_vals))
 
             # print stats of each column of gp_int_vals with n, min, max, mean, std
             gp_int_vals = hcat(gp_int_vals...)
@@ -1020,8 +1076,14 @@ function test_gp_only_gba(sys)
 
             total_integrals = [gp_int_vals_stats[1][i] + sphere_integrals[i] for i in 1:length(f_list)]
             @info "Total integrals (sphere + GP integrations) for functions $(join(f_names, ", ")) = $total_integrals"
+
+            # add to integral totals
+            for (i, total_integral) in enumerate(total_integrals)
+                integral_totals[i] += total_integral
+            end
         end
     end
+    @info "Total integrals (sphere + GP integrations) for functions $(join(f_names, ", ")) = $integral_totals"
 end
 
 
